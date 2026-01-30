@@ -10,8 +10,8 @@
     "dev": "tsc && node dist/index.js"
   },
   "dependencies": {
-    "@dendotdev/conch": "file:../conch/src/node",
-    "@dendotdev/grunt": "file:../grunt/src/node"
+    "@dendotdev/conch": "1.0.1",
+    "@dendotdev/grunt": "1.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
