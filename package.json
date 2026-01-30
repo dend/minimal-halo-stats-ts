@@ -1,0 +1,23 @@
+{
+  "name": "minimal-halo-stats",
+  "version": "1.0.0",
+  "description": "A minimal CLI to display your last 10 Halo Infinite matches",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "dependencies": {
+    "@dendotdev/conch": "file:../conch/src/node",
+    "@dendotdev/grunt": "file:../grunt/src/node"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
