@@ -141,3 +141,5 @@ vite.config.ts.timestamp-*
 # App-specific
 config.json
 tokens.json
+/.claude
+/films

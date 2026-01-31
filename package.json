@@ -7,11 +7,12 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc && node dist/index.js"
+    "dev": "tsc && node dist/index.js",
+    "parse-film": "tsc && node dist/parse-film.js"
   },
   "dependencies": {
     "@dendotdev/conch": "1.0.1",
-    "@dendotdev/grunt": "1.0.1"
+    "@dendotdev/grunt": "1.0.3"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

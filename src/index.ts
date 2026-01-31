@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { URL } from 'node:url';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { XboxAuthenticationClient } from '@dendotdev/conch';
 import {
@@ -20,6 +21,7 @@ interface StoredTokens {
   spartanToken: string;
   spartanTokenExpiry: number;
   xuid: string;
+  xblToken?: string; // XBL3.0 x={userHash};{xstsToken} for Xbox Live API calls
 }
 
 const CONFIG_PATH = './config.json';
@@ -75,7 +77,7 @@ async function waitForAuthCode(redirectUri: string): Promise<string> {
   });
 }
 
-async function authenticate(config: Config): Promise<{ spartanToken: string; xuid: string; refreshToken: string }> {
+async function authenticate(config: Config): Promise<{ spartanToken: string; xuid: string; refreshToken: string; xblToken: string }> {
   const xboxClient = new XboxAuthenticationClient();
 
   const authUrl = xboxClient.generateAuthUrl(config.clientId, config.redirectUri);
@@ -102,9 +104,13 @@ async function authenticate(config: Config): Promise<{ spartanToken: string; xui
   }
 
   const xuid = xboxXstsToken.DisplayClaims?.xui?.[0]?.xid;
-  if (!xuid) {
-    throw new Error('Failed to get XUID from Xbox XSTS token');
+  const userHash = xboxXstsToken.DisplayClaims?.xui?.[0]?.uhs;
+  if (!xuid || !userHash) {
+    throw new Error('Failed to get XUID/userHash from Xbox XSTS token');
   }
+
+  // Build XBL3.0 authorization header for Xbox Live API calls
+  const xblToken = `XBL3.0 x=${userHash};${xboxXstsToken.Token}`;
 
   const relyingParty = HaloAuthenticationClient.getRelyingParty();
   const haloXstsToken = await xboxClient.requestXstsToken(userToken.Token, relyingParty as "http://xboxlive.com");
@@ -122,10 +128,11 @@ async function authenticate(config: Config): Promise<{ spartanToken: string; xui
     spartanToken: spartanTokenResponse.token,
     xuid,
     refreshToken: oauthToken.refresh_token ?? '',
+    xblToken,
   };
 }
 
-async function refreshAuthentication(config: Config, refreshToken: string): Promise<{ spartanToken: string; xuid: string; refreshToken: string }> {
+async function refreshAuthentication(config: Config, refreshToken: string): Promise<{ spartanToken: string; xuid: string; refreshToken: string; xblToken: string }> {
   const xboxClient = new XboxAuthenticationClient();
 
   console.log('Refreshing authentication...');
@@ -150,9 +157,13 @@ async function refreshAuthentication(config: Config, refreshToken: string): Prom
   }
 
   const xuid = xboxXstsToken.DisplayClaims?.xui?.[0]?.xid;
-  if (!xuid) {
-    throw new Error('Failed to get XUID from Xbox XSTS token');
+  const userHash = xboxXstsToken.DisplayClaims?.xui?.[0]?.uhs;
+  if (!xuid || !userHash) {
+    throw new Error('Failed to get XUID/userHash from Xbox XSTS token');
   }
+
+  // Build XBL3.0 authorization header for Xbox Live API calls
+  const xblToken = `XBL3.0 x=${userHash};${xboxXstsToken.Token}`;
 
   // Get XSTS token with Halo Waypoint relying party (for Spartan token)
   const relyingParty = HaloAuthenticationClient.getRelyingParty();
@@ -175,6 +186,7 @@ async function refreshAuthentication(config: Config, refreshToken: string): Prom
     spartanToken: spartanTokenResponse.token,
     xuid,
     refreshToken: oauthToken.refresh_token ?? refreshToken,
+    xblToken,
   };
 }
 
@@ -223,6 +235,103 @@ function formatPacificTime(isoString: string | undefined): string {
     minute: '2-digit',
     hour12: true,
   });
+}
+
+async function printMatchStats(client: HaloInfiniteClient, matchId: string): Promise<void> {
+  console.log('');
+  console.log(bold('Match Stats (JSON)'));
+  console.log(dim('─'.repeat(70)));
+
+  const stats = await client.stats.getMatchStats(matchId);
+
+  if (!isSuccess(stats)) {
+    console.error(red(`Failed to fetch match stats: ${stats.response.code}`));
+    return;
+  }
+
+  console.log(JSON.stringify(stats.result, null, 2));
+}
+
+interface FilmChunk {
+  Index: number;
+  FileRelativePath: string;
+  ChunkSize: number;
+  ChunkType: number;
+}
+
+interface FilmCustomData {
+  Chunks: FilmChunk[];
+  MatchId: string;
+  FilmLength: number;
+  HasGameEnded: boolean;
+}
+
+interface FilmResponse {
+  BlobStoragePathPrefix: string;
+  CustomData: FilmCustomData;
+  AssetId: string;
+  FilmStatusBond: number;
+}
+
+async function downloadFilm(client: HaloInfiniteClient, matchId: string): Promise<void> {
+  console.log('');
+  console.log(bold('Downloading Film'));
+  console.log(dim('─'.repeat(70)));
+
+  console.log(dim(`Match ID: ${matchId}`));
+
+  const filmResult = await client.ugcDiscovery.getFilmByMatchId(matchId);
+
+  if (!isSuccess(filmResult)) {
+    console.log(yellow('No film available for this match (films expire after ~2 weeks).'));
+    return;
+  }
+
+  const film = filmResult.result as unknown as FilmResponse;
+  const blobPrefix = film.BlobStoragePathPrefix;
+  const chunks = film.CustomData?.Chunks;
+
+  if (!blobPrefix || !chunks?.length) {
+    console.log(yellow('Film has no downloadable chunks.'));
+    return;
+  }
+
+  // Strip the origin from the blob prefix - getBlob expects just the path
+  // e.g., "https://blobs-infiniteugc.svc.halowaypoint.com/ugcstorage/film/..." -> "/ugcstorage/film/..."
+  const blobOrigin = 'https://blobs-infiniteugc.svc.halowaypoint.com';
+  let blobPathPrefix = blobPrefix.startsWith(blobOrigin)
+    ? blobPrefix.slice(blobOrigin.length)
+    : blobPrefix;
+
+  // Remove trailing slash to avoid double slashes when appending FileRelativePath
+  if (blobPathPrefix.endsWith('/')) {
+    blobPathPrefix = blobPathPrefix.slice(0, -1);
+  }
+
+  const filmsDir = join(process.cwd(), 'films', matchId);
+  await mkdir(filmsDir, { recursive: true });
+
+  console.log(`Downloading ${chunks.length} chunk(s) to ${filmsDir}`);
+
+  for (const chunk of chunks) {
+    const blobPath = blobPathPrefix + chunk.FileRelativePath;
+    const filename = `filmChunk${chunk.Index}`;
+
+    console.log(dim(`  [${chunk.Index + 1}/${chunks.length}] ${filename} (${(chunk.ChunkSize / 1024).toFixed(1)} KB)`));
+
+    const blob = await client.ugc.getBlob(blobPath);
+
+    if (!isSuccess(blob)) {
+      console.log(red(`    Failed: ${blob.response.code}`));
+      continue;
+    }
+
+    await writeFile(join(filmsDir, filename), blob.result);
+    console.log(green(`    Saved`));
+  }
+
+  console.log('');
+  console.log(green(`Film saved to: ${filmsDir}`));
 }
 
 async function fetchAndDisplayMatches(spartanToken: string, xuid: string): Promise<void> {
@@ -285,6 +394,15 @@ async function fetchAndDisplayMatches(spartanToken: string, xuid: string): Promi
 
   console.log('');
   console.log(dim(`─── ${resultsArray.length} matches ───`));
+
+  // Get most recent match ID and fetch details + film
+  const mostRecentMatch = resultsArray[0];
+  const mostRecentMatchId = (mostRecentMatch.MatchId ?? mostRecentMatch.matchId) as string;
+
+  if (mostRecentMatchId && mostRecentMatchId !== '-') {
+    await printMatchStats(client, mostRecentMatchId);
+    await downloadFilm(client, mostRecentMatchId);
+  }
 }
 
 async function main(): Promise<void> {
@@ -307,6 +425,7 @@ async function main(): Promise<void> {
           spartanToken: refreshed.spartanToken,
           spartanTokenExpiry: Date.now() + 3600000,
           xuid: refreshed.xuid,
+          xblToken: refreshed.xblToken,
         };
         await saveTokens(tokens);
         needsAuth = false;
@@ -323,6 +442,7 @@ async function main(): Promise<void> {
       spartanToken: authResult.spartanToken,
       spartanTokenExpiry: Date.now() + 3600000,
       xuid: authResult.xuid,
+      xblToken: authResult.xblToken,
     };
     await saveTokens(tokens);
   }
